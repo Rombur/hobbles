@@ -379,7 +379,7 @@ void HeatEquation<dim>::run()
 
 
   VectorTools::interpolate(dof_handler,
-                           Functions::ZeroFunction<dim>(),
+                           ZeroFunction<dim>(),
                            old_solution);
   solution = old_solution;
 
