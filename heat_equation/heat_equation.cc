@@ -49,6 +49,14 @@
 #include <fstream>
 #include <iostream>
 
+#include "demo_constants.h"
+#include "demo_app.h"
+
+extern hdb_db_t         hobbes_master_db;
+void                    *db             = NULL;
+hcq_handle_t            hcq_from_driver = HCQ_INVALID_HANDLE;
+hcq_handle_t            hcq_to_driver   = HCQ_INVALID_HANDLE;
+const char              *app            = "appA";
 
 using namespace dealii;
 
@@ -90,7 +98,11 @@ private:
   const double         theta;
 
   std::vector<std::pair<Point<dim>, types::global_dof_index>> interior_boundary;
+/*
   std::vector<double> interior_values;
+  Hobbes::vector<std::pair<Point<dim>, types::global_dof_index>> interior_boundary;
+*/
+  Hobbes::vector<double> interior_values;
 };
 
 
@@ -183,7 +195,10 @@ HeatEquation<dim>::HeatEquation ()
   time_step(1. / 500),
   timestep_number (0),
   theta(0.5)
-{}
+{
+    interior_values._export(app);
+    //interior_boundary._export(app);
+}
 
 
 
@@ -365,6 +380,8 @@ void HeatEquation<dim>::output_results() const
 template <int dim>
 void HeatEquation<dim>::run()
 {
+  int rc;
+
   build_mesh();
 
   setup_system();
@@ -430,12 +447,64 @@ void HeatEquation<dim>::run()
         output_results();
 
       old_solution = solution;
+
+      /* Computation is completed, we let the driver know that the
+         mesh is ready to be transfered to appA */
+      rc = _app_notify_driver (hcq_from_driver);
+      if (rc == -1)
+      {
+        fprintf (stderr, "ERROR: _app_notify_driver() failed\n");
+      }
+
+      /* We wait a signal from the driver to let us know that the
+         mesh can be used again for another iteration. */
+      rc = _app_wait (hcq_to_driver);
+      if (rc == -1)
+      {
+        fprintf (stderr, "ERROR: _app_wait() failed\n");
+      }
+
     }
 }
 
 
 int main()
 {
+  int rc;
+
+  rc = _setup_hobbes (&db, NULL, NULL);
+  if (rc != 0)
+  {
+    fprintf (stderr, "ERROR: _setup_hobbes() failed\n");
+    goto exit_fn_on_error;
+  }
+
+  /*
+   * Setting up 2 comamnd queues for bi-directional commands with the driver.
+   */
+  rc = _app_handshake (app, &hcq_to_driver, &hcq_from_driver);
+  if (rc == -1)
+  {
+    fprintf (stderr, "ERROR: _app_handshake() failed\n");
+    goto exit_fn_on_error;
+  }
+
+  // Notifying driver that we are up...
+  rc = _app_notify_driver (hcq_from_driver);
+  if (rc == -1)
+  {
+    fprintf (stderr, "ERROR: _app_notify_driver() failed\n");
+    goto exit_fn_on_error;
+  }
+
+  // Waiting for the ACK from the driver before we start running...
+  rc = _app_wait (hcq_to_driver);
+  if (rc == -1)
+  {
+    fprintf (stderr, "ERROR: _app_wait() failed\n");
+    goto exit_fn_on_error;
+  }
+
   try
     {
       using namespace dealii;
@@ -454,7 +523,7 @@ int main()
                 << "----------------------------------------------------"
                 << std::endl;
 
-      return 1;
+      goto exit_fn_on_error;
     }
   catch (...)
     {
@@ -465,8 +534,32 @@ int main()
                 << std::endl
                 << "----------------------------------------------------"
                 << std::endl;
-      return 1;
+      goto exit_fn_on_error;
     }
 
+  rc = _app_wait (hcq_to_driver);
+  if (rc == -1)
+  {
+    fprintf (stderr, "ERROR: _app_wait() failed\n");
+    goto exit_fn_on_error;
+  }
+
+  hcq_disconnect (hcq_from_driver);
+  hdb_detach (db);
+
   return 0;
+
+ exit_fn_on_error:
+
+  if (hcq_from_driver != HCQ_INVALID_HANDLE)
+  {
+    hcq_disconnect (hcq_from_driver);
+  }
+
+  if (db != NULL)
+  {
+    hdb_detach (db);
+  }
+
+  return 1;
 }

@@ -63,8 +63,15 @@
 #include <sstream>
 #include <limits>
 
+#include "demo_constants.h"
+#include "demo_app.h"
 
 using namespace dealii;
+
+void                    *db             = NULL;
+hcq_handle_t            hcq_from_driver = HCQ_INVALID_HANDLE;
+hcq_handle_t            hcq_to_driver   = HCQ_INVALID_HANDLE;
+const char              *app            = "appB";
 
 namespace EquationData
 {
@@ -566,12 +573,15 @@ void BoussinesqFlowProblem<dim>::setup_dofs ()
   }
 
   std::vector<types::global_dof_index> stokes_dofs_per_block (2);
+//  Hobbes::vector<types::global_dof_index> stokes_dofs_per_block (2);
   DoFTools::count_dofs_per_block (stokes_dof_handler, stokes_dofs_per_block,
                                   stokes_sub_blocks);
 
   const unsigned int n_u = stokes_dofs_per_block[0],
                      n_p = stokes_dofs_per_block[1],
                      n_T = temperature_dof_handler.n_dofs();
+
+//  stokes_dofs_per_block._export(app);
 
   std::cout << "Number of active cells: "
             << triangulation.n_active_cells()
@@ -906,10 +916,13 @@ void BoussinesqFlowProblem<dim>::assemble_temperature_matrix ()
 
   std::vector<types::global_dof_index> local_dof_indices (dofs_per_cell);
 
-  std::vector<double>         phi_T       (dofs_per_cell);
+//  std::vector<double>         phi_T       (dofs_per_cell);
+  Hobbes::vector<double>         phi_T       (dofs_per_cell);
+  phi_T._export (app);
   std::vector<Tensor<1,dim> > grad_phi_T  (dofs_per_cell);
 
   typename DoFHandler<dim>::active_cell_iterator
+
   cell = temperature_dof_handler.begin_active(),
   endc = temperature_dof_handler.end();
   for (; cell!=endc; ++cell)
@@ -1256,6 +1269,7 @@ void BoussinesqFlowProblem<dim>::output_results ()  const
 template <int dim>
 void BoussinesqFlowProblem<dim>::run ()
 {
+  int rc;
   const unsigned int initial_refinement = (dim == 2 ? 5 : 2);
 
   GridGenerator::hyper_cube (triangulation, 1., 11.);
@@ -1278,6 +1292,12 @@ void BoussinesqFlowProblem<dim>::run ()
 
   do
     {
+      rc = _app_wait (hcq_to_driver);
+      if (rc == -1)
+      {
+        fprintf (stderr, "ERROR: _app_wait() failed\n");
+      }
+
       std::cout << "Timestep " << timestep_number
                 << ":  t=" << time
                 << std::endl;
@@ -1298,6 +1318,12 @@ void BoussinesqFlowProblem<dim>::run ()
       old_stokes_solution          = stokes_solution;
       old_old_temperature_solution = old_temperature_solution;
       old_temperature_solution     = temperature_solution;
+
+      rc = _app_notify_driver (hcq_from_driver);
+      if (rc == -1)
+      {
+        fprintf (stderr, "ERROR: _app_notify_driver() failed\n");
+      }
     }
   while (time <= 100);
 }
@@ -1307,6 +1333,34 @@ void BoussinesqFlowProblem<dim>::run ()
 
 int main (int argc, char *argv[])
 {
+  int rc;
+
+  rc = _setup_hobbes (&db, NULL, NULL);
+  if (rc != 0)
+  {
+    fprintf (stderr, "ERROR: _setup_hobbes() failed\n");
+    goto exit_fn_on_error;
+  }
+
+  /*
+   * Setting up 2 comamnd queues for bi-directional commands with the
+   * driver.
+   */
+  rc = _app_handshake (app, &hcq_to_driver, &hcq_from_driver);
+  if (rc == -1)
+  {
+    fprintf (stderr, "ERROR: _app_handshake() failed\n");
+    goto exit_fn_on_error;
+  }
+
+  // Notifying the driver that we are up...
+  rc = _app_notify_driver (hcq_from_driver);
+  if (rc == -1)
+  {
+    fprintf (stderr, "ERROR: _app_notify_driver() failed\n");
+    goto exit_fn_on_error;
+  }
+
   try
     {
       using namespace dealii;
@@ -1331,7 +1385,7 @@ int main (int argc, char *argv[])
                 << "----------------------------------------------------"
                 << std::endl;
 
-      return 1;
+      goto exit_fn_on_error;
     }
   catch (...)
     {
@@ -1342,8 +1396,32 @@ int main (int argc, char *argv[])
                 << "Aborting!" << std::endl
                 << "----------------------------------------------------"
                 << std::endl;
-      return 1;
+      goto exit_fn_on_error;
     }
 
+  rc = _app_wait (hcq_to_driver);
+  if (rc == -1)
+  {
+    fprintf (stderr, "ERROR: _app_wait() failed\n");
+    goto exit_fn_on_error;
+  }
+
+  hcq_disconnect (hcq_from_driver);
+  hdb_detach (db);
+
   return 0;
+
+ exit_fn_on_error:
+
+  if (hcq_from_driver != HCQ_INVALID_HANDLE)
+  {
+    hcq_disconnect (hcq_from_driver);
+  }
+
+  if (db != NULL)
+  {
+    hdb_detach (db);
+  }
+
+  return 1;
 }
