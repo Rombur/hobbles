@@ -107,23 +107,27 @@ namespace EquationData
   }
 
 
-  template <int dim>
+  template <int dim, typename VECTOR>
   class TemperatureRightHandSide : public Function<dim>
   {
   public:
-    TemperatureRightHandSide () : Function<dim>(1) {}
+    TemperatureRightHandSide (VECTOR const & hobbles_values) : Function<dim>(1),
+      hobbles_values(hobbles_values)     {}
 
     virtual double value (const Point<dim>   &p,
                           const unsigned int  component = 0) const;
 
     virtual void vector_value (const Point<dim> &p,
                                Vector<double>   &value) const;
+  private:
+    VECTOR hobbles_values;
+    mutable unsigned int counter =0;
   };
 
 
-  template <int dim>
+  template <int dim, typename VECTOR>
   double
-  TemperatureRightHandSide<dim>::value (const Point<dim>  &p,
+  TemperatureRightHandSide<dim, VECTOR>::value (const Point<dim>  &p,
                                         const unsigned int component) const
   {
     (void) component;
@@ -131,22 +135,19 @@ namespace EquationData
             ExcMessage ("Invalid operation for a scalar function."));
 
     Assert (dim==2, ExcNotImplemented());
+    Assert (counter<hobbles_values.size(), ExcInternalError());
 
-    // The value should come from DTK. To current value is just for testing
-    if ((p[0] < 8.) && (p[0] > 4.) && (p[1] < 1.2))
-      return 1.;
-    else
-      return 0.;
+    return hobbles_values[counter++];
   }
 
 
-  template <int dim>
+  template <int dim, typename VECTOR>
   void
-  TemperatureRightHandSide<dim>::vector_value (const Point<dim> &p,
+  TemperatureRightHandSide<dim, VECTOR>::vector_value (const Point<dim> &p,
                                                Vector<double>   &values) const
   {
     for (unsigned int c=0; c<this->n_components; ++c)
-      values(c) = TemperatureRightHandSide<dim>::value (p, c);
+      values(c) = TemperatureRightHandSide<dim, VECTOR>::value (p, c);
   }
 }
 
@@ -339,6 +340,9 @@ private:
   bool                                rebuild_stokes_matrix;
   bool                                rebuild_temperature_matrices;
   bool                                rebuild_stokes_preconditioner;
+
+  std::vector<Point<dim>> hobbles_coords;
+  std::vector<double> hobbles_values;
 };
 
 
@@ -1003,7 +1007,7 @@ assemble_temperature_system (const double maximal_velocity)
   std::vector<double>         old_temperature_laplacians(n_q_points);
   std::vector<double>         old_old_temperature_laplacians(n_q_points);
 
-  EquationData::TemperatureRightHandSide<dim>  temperature_right_hand_side;
+  EquationData::TemperatureRightHandSide<dim, std::vector<double>>  temperature_right_hand_side(hobbles_values);
   std::vector<double> gamma_values (n_q_points);
 
   std::vector<double>         phi_T      (dofs_per_cell);
@@ -1042,8 +1046,11 @@ assemble_temperature_system (const double maximal_velocity)
       temperature_fe_values.get_function_laplacians (old_old_temperature_solution,
                                                      old_old_temperature_laplacians);
 
-      temperature_right_hand_side.value_list (temperature_fe_values.get_quadrature_points(),
-                                              gamma_values);
+      if ((cell->at_boundary()) && (cell->center()[1]<2))
+        temperature_right_hand_side.value_list (temperature_fe_values.get_quadrature_points(),
+                                                gamma_values);
+      else 
+        std::fill(gamma_values.begin(), gamma_values.end(), 0.);
 
       stokes_fe_values[velocities].get_function_values (stokes_solution,
                                                         old_velocity_values);
@@ -1264,6 +1271,41 @@ void BoussinesqFlowProblem<dim>::run ()
   triangulation.refine_global (initial_refinement);
 
   setup_dofs();
+
+  const QGauss<dim> quadrature_formula(temperature_degree+2);
+  FEValues<dim>     temperature_fe_values (temperature_fe, quadrature_formula,
+                                           update_quadrature_points);
+
+  const unsigned int   dofs_per_cell   = temperature_fe.dofs_per_cell;
+  const unsigned int   n_q_points      = quadrature_formula.size();
+
+
+  typename DoFHandler<dim>::active_cell_iterator
+  cell = temperature_dof_handler.begin_active(),
+  endc = temperature_dof_handler.end();
+  typename DoFHandler<dim>::active_cell_iterator
+  stokes_cell = stokes_dof_handler.begin_active();
+  std::vector<Point<dim>> hobbles_vector;
+  for (; cell!=endc; ++cell, ++stokes_cell)
+  {
+      if ((cell->at_boundary()) && (cell->center()[1]<2))
+      {
+        temperature_fe_values.reinit(cell);
+        for (auto point : temperature_fe_values.get_quadrature_points())
+        {
+          hobbles_vector.push_back(point);
+        }
+      }
+  }
+
+  // allocate memory for hobbles vector
+  hobbles_coords = std::vector<Point<dim>>(hobbles_vector.size());
+  hobbles_values = std::vector<double>(hobbles_vector.size());
+  // COPY memory
+  std::copy(hobbles_vector.begin(), hobbles_vector.end(), hobbles_coords.begin());
+
+  // Fill with data from DTK
+  std::fill(hobbles_values.begin(), hobbles_values.end(), 1.);
 
   VectorTools::project (temperature_dof_handler,
                         temperature_constraints,
